@@ -1,0 +1,19 @@
+name: price-snapshots-cron
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes (UTC)
+  workflow_dispatch:         # allow manual runs
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Invoke Supabase Edge Function
+        run: |
+          curl -fsS -m 25 \
+            -H "x-cron-key: $EDGE_CRON_SECRET" \
+            "$CRON_PING_URL"
+        env:
+          CRON_PING_URL: ${{ secrets.CRON_PING_URL }}
+          EDGE_CRON_SECRET: ${{ secrets.EDGE_CRON_SECRET }}
