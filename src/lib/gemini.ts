@@ -38,24 +38,67 @@ export async function chatWithAIStream(
   onDelta: (chunk: string) => void,
   shouldStop?: () => boolean
 ): Promise<AIChatResponse> {
-  const prompt = `You are CryptoTrend AI, an expert cryptocurrency advisor. Answer concisely (2-3 sentences max).
+  if (!API_KEY || API_KEY === 'your-gemini-api-key-here') {
+    const fb = 'Gemini API key not configured.';
+    onDelta(fb);
+    return { response: fb, confidence: 40 };
+  }
 
+  const prompt = `You are CryptoTrend AI, an expert cryptocurrency advisor. Answer concisely (2-3 sentences max).
 Question: ${question}
 ${context ? `Context: ${JSON.stringify(context)}` : ''}`;
 
+  const TIMEOUT = 20_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort('timeout'), TIMEOUT);
+
   try {
-    const text = await geminiPost({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.7, topK: 40, topP: 0.95, maxOutputTokens: 250 },
-      safetySettings: [
-        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-      ],
+    const res = await fetch(`${BASE}/models/${MODEL}:generateContent?key=${API_KEY}`, {
+      method: 'POST',
+      mode: 'cors',
+      credentials: 'omit',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.7, topK: 40, topP: 0.95, maxOutputTokens: 250 },
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' },
+        ],
+      }),
     });
 
-    /* simulate streaming */
+    clearTimeout(timer);
+
+    if (!res.ok) {
+      const msg = await res.text();
+      console.error('Gemini HTTP error:', res.status, msg);
+      throw new Error(`Gemini ${res.status}`);
+    }
+
+    const json = await res.json();
+
+    /* ----------  NEW: read real block reason ---------- */
+    const promptFeedback = json.promptFeedback;
+    const safety = json.candidates?.[0]?.safetyRatings;
+    const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+
+    if (!text) {
+      console.warn('Gemini gave empty text → promptFeedback:', promptFeedback, 'safety:', safety);
+      const reason = promptFeedback?.blockReason
+        ? `Blocked (${promptFeedback.blockReason})`
+        : safety?.some((s: any) => s.blocked)
+        ? 'Content filtered for safety'
+        : 'No response generated';
+      const fallback = `AI couldn’t answer that (“${reason}”). Quick tip: DCA, manage risk, do your own research.`;
+      onDelta(fallback);
+      return { response: fallback, confidence: 40 };
+    }
+
+    /* ----------  simulate streaming ---------- */
     const words = text.split(' ');
     const chunkSize = Math.max(1, Math.floor(words.length / 8));
     let full = '';
@@ -74,11 +117,14 @@ ${context ? `Context: ${JSON.stringify(context)}` : ''}`;
     const confidence = calculateChatConfidence(complexity, true, true);
 
     return { response: full.trim(), confidence };
-  } catch (err) {
-    console.error('chatWithAIStream error:', err);
-    const fb = 'AI is currently unavailable. Tip: focus on fundamentals, manage risk, and consider DCA.';
-    onDelta(fb);
-    return { response: fb, confidence: 40 };
+  } catch (err: any) {
+    clearTimeout(timer);
+    console.error('chatWithAIStream final catch:', err);
+    const fallback = err.message === 'timeout'
+      ? 'AI is taking too long – here’s a quick tip: DCA, manage risk, do your own research.'
+      : 'AI service is temporarily unavailable. Tip: focus on fundamentals, manage risk, consider DCA.';
+    onDelta(fallback);
+    return { response: fallback, confidence: 40 };
   }
 }
 
