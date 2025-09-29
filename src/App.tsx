@@ -32,8 +32,10 @@ import Simulator from "./pages/Simulator";
 
 
 const queryClient = new QueryClient();
+console.log("Gemini API Key from Vite:", import.meta.env.VITE_GEMINI_API_KEY);
 
 const App = () => (
+  
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <Toaster />

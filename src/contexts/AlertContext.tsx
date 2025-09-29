@@ -43,8 +43,8 @@ export const AlertProvider: React.FC<AlertProviderProps> = ({ children }) => {
   const generateSmartAlerts = async () => {
     try {
       // Fetch market data for popular currencies with more comprehensive data
-      const response = await fetch(
-        'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&sparkline=true&price_change_percentage=1h%2C24h%2C7d%2C14d%2C30d'
+      const response = await fetch( // Use the Vite proxy
+        '/api/coingecko/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&sparkline=true&price_change_percentage=1h%2C24h%2C7d%2C14d%2C30d'
       );
       
       if (!response.ok) {
