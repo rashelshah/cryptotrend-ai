@@ -52,7 +52,8 @@ ${context ? `Context: ${JSON.stringify(context)}` : ''}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort('timeout'), TIMEOUT);
 
-  try {
+  /* ----------  helper: single POST with retry ---------- */
+  const postGemini = async (attempt = 1): Promise<any> => {
     const res = await fetch(`${BASE}/models/${MODEL}:generateContent?key=${API_KEY}`, {
       method: 'POST',
       mode: 'cors',
@@ -61,7 +62,7 @@ ${context ? `Context: ${JSON.stringify(context)}` : ''}`;
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.7, topK: 40, topP: 0.95, maxOutputTokens: 250 },
+        generationConfig: { temperature: 0.2, topP: 0.95, topK: 40, maxOutputTokens: 2048 },
         safetySettings: [
           { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
           { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
@@ -71,34 +72,29 @@ ${context ? `Context: ${JSON.stringify(context)}` : ''}`;
       }),
     });
 
-    clearTimeout(timer);
-
-    if (!res.ok) {
-      const msg = await res.text();
-      console.error('Gemini HTTP error:', res.status, msg);
-      throw new Error(`Gemini ${res.status}`);
+    if (res.status === 503 && attempt === 1) {
+      console.warn('Gemini 503 – retrying once');
+      await new Promise(r => setTimeout(r, 1200)); // 1.2 s back-off
+      return postGemini(2);
     }
+    if (!res.ok) throw new Error(`Gemini ${res.status}`);
+    return res.json();
+  };
 
-    const json = await res.json();
+  try {
+    const json = await postGemini();
 
-    /* ----------  NEW: read real block reason ---------- */
+    /* ----  block / empty text ---- */
     const promptFeedback = json.promptFeedback;
     const safety = json.candidates?.[0]?.safetyRatings;
     const text = json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 
     if (!text) {
-      console.warn('Gemini gave empty text → promptFeedback:', promptFeedback, 'safety:', safety);
-      const reason = promptFeedback?.blockReason
-        ? `Blocked (${promptFeedback.blockReason})`
-        : safety?.some((s: any) => s.blocked)
-        ? 'Content filtered for safety'
-        : 'No response generated';
-      const fallback = `AI couldn’t answer that (“${reason}”). Quick tip: DCA, manage risk, do your own research.`;
-      onDelta(fallback);
-      return { response: fallback, confidence: 40 };
+      const reason = promptFeedback?.blockReason || safety?.some((s: any) => s.blocked) ? 'Content filtered' : 'No response';
+      throw new Error(reason); // → triggers fallback below
     }
 
-    /* ----------  simulate streaming ---------- */
+    /* ----  simulate streaming ---- */
     const words = text.split(' ');
     const chunkSize = Math.max(1, Math.floor(words.length / 8));
     let full = '';
@@ -120,14 +116,14 @@ ${context ? `Context: ${JSON.stringify(context)}` : ''}`;
   } catch (err: any) {
     clearTimeout(timer);
     console.error('chatWithAIStream final catch:', err);
-    const fallback = err.message === 'timeout'
-      ? 'AI is taking too long – here’s a quick tip: DCA, manage risk, do your own research.'
-      : 'AI service is temporarily unavailable. Tip: focus on fundamentals, manage risk, consider DCA.';
+    const fallback =
+      err.message === 'Gemini 503'
+        ? 'AI is overloaded – here’s a quick tip: DCA, manage risk, do your own research.'
+        : 'AI service is temporarily unavailable. Tip: focus on fundamentals, manage risk, consider DCA.';
     onDelta(fallback);
     return { response: fallback, confidence: 40 };
   }
-}
-
+};
 /* ----------  OTHER EXISTING METHODS (kept, use same geminiPost)  ---------- */
 export const geminiAI = {
   async analyzeCryptocurrency(coinData: any, ctx?: any): Promise<AIAnalysis> {

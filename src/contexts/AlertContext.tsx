@@ -42,51 +42,44 @@ export const AlertProvider: React.FC<AlertProviderProps> = ({ children }) => {
 
   const generateSmartAlerts = async () => {
     try {
-      // Fetch market data for popular currencies with more comprehensive data
-      const response = await fetch( // Use the Vite proxy
-        '/api/coingecko/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&sparkline=true&price_change_percentage=1h%2C24h%2C7d%2C14d%2C30d'
-      );
-      
-      if (!response.ok) {
-        throw new Error(`API request failed: ${response.status}`);
-      }
-      
-      const marketData = await response.json();
-
-      if (!Array.isArray(marketData)) {
-        throw new Error('Invalid API response format');
-      }
-
-      const generatedAlerts: CryptoAlert[] = [];
-
-      // Generate alerts for each coin
+      setLoading(true);
+      // 1️⃣  hit the proxy route (no key needed)
+      const res = await fetch('/api/coingecko-proxy/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&sparkline=false');
+      if (!res.ok) throw new Error(String(res.status));
+      const marketData = await res.json();
+  
+      if (!Array.isArray(marketData)) throw new Error('bad json');
+  
+      const alerts: CryptoAlert[] = [];
+      const now = new Date().toISOString();
+  
       marketData.forEach((coin: any) => {
-        try {
-          const coinAlerts = analyzeAndGenerateAlerts(coin);
-          generatedAlerts.push(...coinAlerts);
-        } catch (coinError) {
-          console.warn(`Error analyzing coin ${coin?.symbol}:`, coinError);
+        const change = coin.price_change_percentage_24h || 0;
+        const rank = coin.market_cap_rank || 999;
+  
+        // top-50 + >3 % move
+        if (rank <= 50 && Math.abs(change) > 3) {
+          alerts.push({
+            id: `${coin.id}-price-${now}`,
+            coinId: coin.id,
+            coinSymbol: coin.symbol.toUpperCase(),
+            coinName: coin.name,
+            type: 'price_breakthrough',
+            message: `${change > 0 ? '🚀' : '📉'} ${coin.symbol.toUpperCase()} ${change > 0 ? 'surged' : 'dropped'} ${Math.abs(change).toFixed(1)}% to $${coin.current_price.toLocaleString()}`,
+            priority: Math.abs(change) > 7 ? 'high' : 'medium',
+            timestamp: now,
+            value: coin.current_price,
+            change,
+            icon: change > 0 ? '🚀' : '📉',
+          });
         }
       });
-
-      // Sort by priority and timestamp, take most important alerts
-      const sortedAlerts = generatedAlerts
-        .filter(alert => alert && alert.id) // Filter out invalid alerts
-        .sort((a, b) => {
-          const priorityOrder = { critical: 4, high: 3, medium: 2, low: 1 };
-          if (priorityOrder[a.priority] !== priorityOrder[b.priority]) {
-            return priorityOrder[b.priority] - priorityOrder[a.priority];
-          }
-          return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
-        });
-
-      console.log(`Generated ${generatedAlerts.length} alerts, sorted ${sortedAlerts.length}`);
-      setAlerts(sortedAlerts);
-      setLoading(false);
-    } catch (error) {
-      console.error('Error generating smart alerts:', error);
-      // Set empty alerts array on error to show "no alerts" state
-      setAlerts([]);
+  
+      setAlerts(alerts);
+    } catch (e) {
+      console.error('Smart alerts error:', e);
+      setAlerts([]); // empty = no alerts
+    } finally {
       setLoading(false);
     }
   };

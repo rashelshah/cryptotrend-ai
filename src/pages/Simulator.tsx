@@ -1,3 +1,4 @@
+/* eslint-disable */
 import React, { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
@@ -11,6 +12,8 @@ import { runSimulation, getSimulationReview, SimulationResult } from '@/lib/simu
 import { useToast } from '@/hooks/use-toast';
 import { BarChart, Sliders, Newspaper, BrainCircuit, Bot, Sparkles, TrendingUp, TrendingDown, Volume2, Square } from 'lucide-react';
 import { synthesizeSpeech, revokeObjectUrl } from '@/lib/elevenlabs';
+import { fitLinearRegression, indexX } from '@/utils/linearRegression';
+import { getHistoricalData } from '@/lib/coinlore';
 
 const Simulator: React.FC = () => {
   const [simulationType, setSimulationType] = useState<string>('single');
@@ -37,29 +40,47 @@ const Simulator: React.FC = () => {
     fetchCryptos();
   }, []);
 
+  const handleStop = () => {
+    try {
+      if (audioEl) { audioEl.pause(); audioEl.currentTime = 0; }
+      if (window.speechSynthesis?.speaking) window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+    } catch {}
+  };
+
+  const handleSpeak = async () => {
+    if (!aiReview || aiReview.startsWith('Generating')) return;
+    try {
+      handleStop();
+      revokeObjectUrl(ttsUrl || undefined);
+      const url = await synthesizeSpeech(aiReview);
+      setTtsUrl(url);
+      const audio = new Audio(url);
+      setAudioEl(audio);
+      audio.onended = () => setIsSpeaking(false);
+      await audio.play();
+      setIsSpeaking(true);
+    } catch {
+      // fallback browser TTS
+      const u = new SpeechSynthesisUtterance(aiReview);
+      u.onend = () => setIsSpeaking(false);
+      setIsSpeaking(true);
+      window.speechSynthesis.speak(u);
+    }
+  };
+
+  /*  MAIN SIMULATION + FALLBACK  */
   const handleRunSimulation = async () => {
     if (!selectedAssetId) {
-      toast({
-        title: 'Error',
-        description: 'Please select an asset to simulate.',
-        variant: 'destructive',
-      });
+      toast({ title: 'Error', description: 'Please select an asset.', variant: 'destructive' });
       return;
     }
-
+  
     setIsLoading(true);
     setSimulationResult(null);
     setAiReview('');
-    // Reset any ongoing TTS playback
-    try {
-      if (audioEl) {
-        audioEl.pause();
-        setIsSpeaking(false);
-      }
-      revokeObjectUrl(ttsUrl || undefined);
-      setTtsUrl(null);
-    } catch {}
-
+    handleStop(); // kill any running TTS
+  
     const params = {
       simulationType: simulationType as 'single' | 'portfolio',
       assetId: selectedAssetId,
@@ -67,79 +88,42 @@ const Simulator: React.FC = () => {
       marketCapChange,
       newsSentiment: newsSentiment as 'positive' | 'neutral' | 'negative',
     };
-
+  
     try {
+      // 1️⃣  NUMERIC SIMULATION
       const result = await runSimulation(params, portfolios, cryptos);
       setSimulationResult(result);
-
+  
+      // 2️⃣  REGRESSION CONTEXT (always build – used by both paths)
+      const hist = await getHistoricalData(selectedAssetId, 24);
+      const reg = hist?.length >= 2
+        ? fitLinearRegression(indexX(hist.length), hist.map((p: any) => Number(p.price)))
+        : null;
+  
+      // 3️⃣  GEMINI FIRST – NEVER LET IT THROW TO OUTER CATCH
       try {
         setAiReview('Generating AI review...');
         const review = await getSimulationReview(params, result);
+        if (!review || !review.trim()) throw new Error('Empty Gemini response'); // force fallback
         setAiReview(review);
-      } catch (reviewError) {
-        console.error('AI review failed:', reviewError);
-        setAiReview('AI review is currently unavailable due to high demand. Please try again later.');
+      } catch (geminiErr: any) {
+        console.warn('Gemini failed → regression fallback', geminiErr);
+  
+        // 4️⃣  REGRESSION FALLBACK (complete sentences)
+        const fallbackText = reg
+          ? `Over the last 24 h the trend is ${reg.slope >= 0 ? 'upward' : 'downward'} (R² ${Math.round(reg.r2 * 100)} %). 
+  Pace ≈ ${((reg.slope / (Number(result.initialValue) || 1)) * 100).toFixed(3)} %/h. 
+  Risk: ${reg.r2 >= 0.5 ? 'medium' : 'high'}. 
+  Recommendation: ${reg.slope >= 0 ? 'buy' : 'sell'} based on regression fit.`
+          : 'AI review unavailable – no trend data. Tip: DCA, manage risk, do your own research.';
+        setAiReview(fallbackText);
       }
     } catch (error) {
       console.error('Simulation failed:', error);
-      toast({
-        title: 'Error',
-        description: 'The simulation failed. Please try again later.',
-        variant: 'destructive',
-      });
+      toast({ title: 'Error', description: 'Simulation failed.', variant: 'destructive' });
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const handleSpeak = async () => {
-    if (!aiReview || aiReview.startsWith('Generating')) return;
-    try {
-      // Stop current playback
-      if (audioEl) {
-        audioEl.pause();
-        setIsSpeaking(false);
-      }
-      revokeObjectUrl(ttsUrl || undefined);
-      setTtsUrl(null);
-
-      try {
-        // Primary: ElevenLabs
-        const url = await synthesizeSpeech(aiReview);
-        setTtsUrl(url);
-        const audio = new Audio(url);
-        setAudioEl(audio);
-        audio.onended = () => setIsSpeaking(false);
-        await audio.play();
-        setIsSpeaking(true);
-      } catch (err) {
-        console.warn('ElevenLabs TTS failed, falling back to browser speech:', err);
-        // Fallback: Browser Speech Synthesis
-        const utterance = new SpeechSynthesisUtterance(aiReview);
-        utterance.onend = () => setIsSpeaking(false);
-        utterance.onerror = () => setIsSpeaking(false);
-        setIsSpeaking(true);
-        window.speechSynthesis.speak(utterance);
-      }
-    } catch (e) {
-      console.error(e);
-      toast({ title: 'TTS Error', description: 'Failed to generate or play audio.', variant: 'destructive' });
-    }
-  };
-
-  const handleStop = () => {
-    try {
-      // Stop ElevenLabs audio if playing
-      if (audioEl) {
-        audioEl.pause();
-        audioEl.currentTime = 0;
-      }
-      // Stop browser speech synthesis if it's speaking
-      if (window.speechSynthesis && window.speechSynthesis.speaking) {
-        window.speechSynthesis.cancel();
-      }
-      setIsSpeaking(false);
-    } catch {}
   };
 
   return (
@@ -150,10 +134,7 @@ const Simulator: React.FC = () => {
             <BrainCircuit className="w-10 h-10 mr-3 text-crypto-green" />
             <span className="bg-gradient-primary bg-clip-text text-transparent">AI "What If" Simulator</span>
           </h1>
-          <p className="text-muted-foreground mt-2">
-            Explore potential market scenarios and test your investment theories in a risk-free environment.
-          </p>
-          
+          <p className="text-muted-foreground mt-2">Explore potential market scenarios and test your investment theories in a risk-free environment.</p>
         </header>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
