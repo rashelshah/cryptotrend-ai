@@ -9,7 +9,7 @@ import { fitLinearRegression, indexX } from "@/utils/linearRegression";
 interface ChartPoint { time: string; price: number; timestamp: number }
 interface Props { coinId?: string; coinName?: string; timeframe?: number }
 
-function CryptoChart({ coinId = "90", coinName = "Bitcoin", timeframe: timeframeProp }: Props) {
+function CryptoChart({ coinId = "90", coinName = "Bitcoin", timeframe: timeframeProp = 24 }: Props) {
   const [data, setData] = useState<ChartPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentPrice, setCurrentPrice] = useState<number>(0);
@@ -22,17 +22,14 @@ function CryptoChart({ coinId = "90", coinName = "Bitcoin", timeframe: timeframe
   const mountedRef = useRef(true);
 
   // Data timeframe (hours)
-  const [timeframe, setTimeframe] = useState<number>(timeframeProp ?? 24);
+  const [timeframe, setTimeframe] = useState<number>(timeframeProp);
 
   // Sync with prop changes from parent
   useEffect(() => {
     if (typeof timeframeProp === 'number' && timeframeProp !== timeframe) {
       setTimeframe(timeframeProp);
-      setRegressionWindow(timeframeProp);
     }
   }, [timeframeProp, timeframe]);
-
-
 
   // Clear interval and set mounted flag on unmount
   useEffect(() => {
@@ -169,74 +166,61 @@ function CryptoChart({ coinId = "90", coinName = "Bitcoin", timeframe: timeframe
     initializeChart();
   }, [coinId, timeframe]);
 
-  // Separate effect for real-time updates (less frequent and more stable)
+  // Separate effect for real-time updates
   useEffect(() => {
     if (!resolvedId || loading || !mountedRef.current) return;
 
-    // Clear existing interval
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-
-    // Set up real-time updates with longer intervals for stability
-    intervalRef.current = setInterval(async () => {
-      if (!mountedRef.current || isUpdating) return;
-
-      try {
-        setIsUpdating(true);
-        const ticker = await getTickerById(resolvedId);
-
-        if (!mountedRef.current) return;
-
-        const newPrice = Number(ticker?.price_usd ?? currentPrice);
-
-        // Only update if price has changed significantly (reduce unnecessary updates)
-        const priceChangeThreshold = currentPrice * 0.001; // 0.1% threshold
-        if (Math.abs(newPrice - currentPrice) < priceChangeThreshold) {
-          return;
-        }
-
-        setCurrentPrice(newPrice);
-
-        // Calculate price change from initial price
-        const change = initialPrice > 0 ? ((newPrice - initialPrice) / initialPrice) * 100 : 0;
-        setPriceChange(change);
-
-        // Add new data point without artificial variation for more accurate representation
-        setData(prevData => {
-          if (!mountedRef.current) return prevData;
-
-          const newPoint: ChartPoint = {
-            time: new Date().toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-              month: "short",
-              day: "numeric",
-              hour12: false
-            }),
-            price: newPrice,
-            timestamp: Date.now()
-          };
-
-          // Keep only points within the current timeframe window
-          const timeframeMs = timeframe * 60 * 60 * 1000; // Convert hours to milliseconds
-          const cutoffTime = Date.now() - timeframeMs;
-
-          const updatedData = [...prevData.filter(point => point.timestamp >= cutoffTime), newPoint];
-
-          // Limit to reasonable number of points for performance (max 50 for hourly data, less for longer periods)
-          const maxPoints = Math.min(50, Math.max(10, timeframe));
-          return updatedData.slice(-maxPoints);
-        });
-      } catch (error) {
-        console.error("Error updating chart:", error);
-      } finally {
-        if (mountedRef.current) {
-          setIsUpdating(false);
-        }
+    const setupInterval = () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
       }
-    }, 30000); // Update every 30 seconds instead of 15 for more stability
+
+      intervalRef.current = setInterval(async () => {
+        if (!mountedRef.current || isUpdating) return;
+
+        try {
+          setIsUpdating(true);
+          const ticker = await getTickerById(resolvedId);
+
+          if (!mountedRef.current) return;
+
+          const newPrice = Number(ticker?.price_usd ?? currentPrice);
+          const priceChangeThreshold = currentPrice * 0.001; // 0.1%
+
+          if (Math.abs(newPrice - currentPrice) < priceChangeThreshold) {
+            return;
+          }
+
+          setCurrentPrice(newPrice);
+          const change = initialPrice > 0 ? ((newPrice - initialPrice) / initialPrice) * 100 : 0;
+          setPriceChange(change);
+
+          setData(prevData => {
+            if (!mountedRef.current) return prevData;
+
+            const newPoint: ChartPoint = {
+              time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", month: "short", day: "numeric", hour12: false }),
+              price: newPrice,
+              timestamp: Date.now()
+            };
+
+            const timeframeMs = timeframe * 60 * 60 * 1000;
+            const cutoffTime = Date.now() - timeframeMs;
+            const updatedData = [...prevData.filter(point => point.timestamp >= cutoffTime), newPoint];
+            const maxPoints = Math.min(200, Math.max(50, timeframe));
+            return updatedData.slice(-maxPoints);
+          });
+        } catch (error) {
+          console.error("Error updating chart:", error);
+        } finally {
+          if (mountedRef.current) {
+            setIsUpdating(false);
+          }
+        }
+      }, 30000); // Update every 30 seconds
+    };
+
+    setupInterval();
 
     return () => {
       if (intervalRef.current) {
@@ -244,7 +228,7 @@ function CryptoChart({ coinId = "90", coinName = "Bitcoin", timeframe: timeframe
         intervalRef.current = null;
       }
     };
-  }, [resolvedId, loading, currentPrice, initialPrice]);
+  }, [resolvedId, loading, currentPrice, initialPrice, isUpdating, timeframe]);
 
   const CustomTooltip = useCallback(({ active, payload, label }: any) => {
     if (active && payload && payload.length) {
@@ -252,34 +236,29 @@ function CryptoChart({ coinId = "90", coinName = "Bitcoin", timeframe: timeframe
         <div className="bg-card border border-border rounded-lg p-3 shadow-lg">
           <p className="text-sm text-muted-foreground">{label}</p>
           <p className="text-lg font-mono font-bold text-foreground">
-            ${payload[0].value.toLocaleString(undefined, {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: currentPrice >= 1 ? 2 : 6
-            })}
+            ${payload[0].value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}
           </p>
         </div>
       );
     }
     return null;
-  }, [currentPrice]);
+  }, []);
 
   const onView = useCallback(() => {
     const id = resolvedId ?? coinId;
     navigate(`/analysis/${id}`);
   }, [resolvedId, coinId, navigate]);
 
-  // Format Y-axis values appropriately based on price range
   const formatYAxis = useCallback((value: number) => {
     if (value >= 1000) {
-      return `$${(value / 1000).toFixed(0)}K`;
+      return `${(value / 1000).toFixed(0)}K`;
     } else if (value >= 1) {
-      return `$${value.toFixed(2)}`;
+      return `${value.toFixed(2)}`;
     } else {
-      return `$${value.toFixed(6)}`;
+      return `${value.toFixed(6)}`;
     }
   }, []);
 
-  // Memoize computed values to prevent unnecessary re-renders
   const lineColor = useMemo(() =>
     priceChange >= 0 ? 'hsl(var(--crypto-green))' : 'hsl(var(--crypto-red))',
     [priceChange]
@@ -298,11 +277,19 @@ function CryptoChart({ coinId = "90", coinName = "Bitcoin", timeframe: timeframe
     [priceChange]
   );
 
-  // UI state for trend controls
   const [showTrend, setShowTrend] = useState(true);
-  const [regressionWindow, setRegressionWindow] = useState<number>(timeframeProp ?? 24); // Initialize with timeframe
+  const [regressionWindow, setRegressionWindow] = useState<number>(50);
 
-  // Build regression over the last N points only
+  useEffect(() => {
+    if (timeframe <= 24) {
+      setRegressionWindow(50);
+    } else if (timeframe <= 72) {
+      setRegressionWindow(100);
+    } else {
+      setRegressionWindow(150);
+    }
+  }, [timeframe]);
+
   const regressionInfo = useMemo(() => {
     if (!data || data.length < 2) return null;
     const n = Math.min(data.length, Math.max(2, regressionWindow));
@@ -311,12 +298,10 @@ function CryptoChart({ coinId = "90", coinName = "Bitcoin", timeframe: timeframe
     const y = data.slice(start).map((d) => d.price);
     const res = fitLinearRegression(x, y);
     if (!res) return null;
-    // expose R² globally for Metrics quick view
     try { (window as any).__latestTrendR2 = res.r2; } catch {}
     return { res, start };
   }, [data, regressionWindow]);
 
-  // Chart data with conditional trend overlay
   const chartData = useMemo(() => {
     if (!regressionInfo) return data;
     const { res, start } = regressionInfo;
@@ -330,33 +315,25 @@ function CryptoChart({ coinId = "90", coinName = "Bitcoin", timeframe: timeframe
     <Card className="bg-glass-bg backdrop-blur-glass border-glass-border">
       <CardHeader className="px-4 sm:px-6">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-0">
-          <CardTitle className="text-lg sm:text-xl lg:text-2xl font-bold">{coinName} Price Chart</CardTitle>
-          <div className="flex items-center space-x-2">
-            {priceChange >= 0 ?
-              <TrendingUp className="w-4 h-4 sm:w-5 sm:h-5 text-crypto-green" /> :
-              <TrendingDown className="w-4 h-4 sm:w-5 sm:h-5 text-crypto-red" />
-            }
-            <span className={`font-mono font-bold text-sm sm:text-base ${priceChange >= 0 ? 'text-crypto-green' : 'text-crypto-red'}`}>
-              {formattedPriceChange}
-            </span>
-          </div>
-        </div>
-        <div className="flex items-baseline justify-between gap-3">
-          <div className="flex items-baseline space-x-2">
-            <span className="text-xl sm:text-2xl lg:text-3xl font-mono font-bold">
-              ${formattedPrice}
-            </span>
-            <span className="text-xs sm:text-sm text-muted-foreground">USD</span>
-          </div>
-          {/* Trend controls (only show trend toggle; timeframe unified at page level) */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowTrend((v) => !v)}
-              className={`px-2 py-1 text-xs rounded-md border ${showTrend ? 'border-primary text-primary' : 'border-border text-muted-foreground'} hover:bg-muted/30`}
-              aria-pressed={showTrend}
-            >
-              {showTrend ? 'Hide Trend' : 'Show Trend'}
-            </button>
+          <CardTitle className="text-lg sm:text-xl lg:text-2xl font-bold">
+            <div className="flex items-center space-x-2">
+              {priceChange >= 0 ? (
+                <TrendingUp className="w-4 h-4 sm:w-5 sm:h-5 text-crypto-green" />
+              ) : (
+                <TrendingDown className="w-4 h-4 sm:w-5 sm:h-5 text-crypto-red" />
+              )}
+              <span>{coinName}</span>
+            </div>
+          </CardTitle>
+          <div className="flex items-baseline justify-between gap-3">
+            <div className="flex items-baseline space-x-2">
+              <span className="text-xl sm:text-2xl lg:text-3xl font-mono font-bold">
+                ${formattedPrice}
+              </span>
+              <span className={`text-sm font-semibold ${priceChange >= 0 ? 'text-crypto-green' : 'text-crypto-red'}`}>
+                {formattedPriceChange}
+              </span>
+            </div>
           </div>
         </div>
       </CardHeader>
@@ -365,59 +342,45 @@ function CryptoChart({ coinId = "90", coinName = "Bitcoin", timeframe: timeframe
           <div className="h-60 sm:h-80 flex items-center justify-center">
             <div className="flex items-center space-x-2">
               <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary"></div>
-              <div className="animate-pulse text-muted-foreground text-sm sm:text-base">Loading chart data...</div>
+              <div className="animate-pulse text-muted-foreground text-sm sm:text-base">
+                Loading Chart...
+              </div>
             </div>
           </div>
         ) : data.length === 0 ? (
           <div className="h-60 sm:h-80 flex items-center justify-center">
-            <div className="text-muted-foreground text-sm sm:text-base">No chart data available</div>
+            <div className="text-muted-foreground text-sm sm:text-base">
+              No data available for this currency.
+            </div>
           </div>
         ) : (
           <div className="h-60 sm:h-80">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart 
-                data={chartData} 
-                margin={{ top: 5, right: 20, left: 10, bottom: 5 }}
-              >
+              <LineChart data={chartData}>
                 <CartesianGrid 
                   strokeDasharray="3 3" 
                   stroke="hsl(var(--border))" 
                   opacity={0.3} 
                 />
-                <XAxis
-                  dataKey="time"
-                  axisLine={false}
-                  tickLine={false}
-                  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: window.innerWidth < 640 ? 10 : 12 }}
-                  interval="preserveStartEnd"
-                  minTickGap={window.innerWidth < 640 ? 20 : 30}
-                  angle={timeframe > 24 ? -45 : 0}
-                  textAnchor={timeframe > 24 ? 'end' : 'middle'}
-                  height={timeframe > 24 ? 60 : 30}
-                />
-                <YAxis
-                  axisLine={false}
-                  tickLine={false}
-                  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: window.innerWidth < 640 ? 10 : 12 }}
-                  tickFormatter={formatYAxis}
-                  domain={['dataMin - dataMin * 0.001', 'dataMax + dataMax * 0.001']}
-                  width={window.innerWidth < 640 ? 40 : 60}
-                />
-                <Tooltip content={<CustomTooltip />} />
-                <Line 
-                  type="monotone" 
-                  dataKey="price" 
-                  stroke={lineColor}
-                  strokeWidth={2} 
-                  dot={false} 
-                  activeDot={{ 
-                    r: 4, 
-                    fill: lineColor, 
-                    stroke: 'hsl(var(--background))', 
-                    strokeWidth: 2 
+                <XAxis 
+                  dataKey="time" 
+                  hide={false}
+                  tickFormatter={(timeStr) => {
+                    const date = new Date(timeStr);
+                    if (isNaN(date.getTime())) return "";
+                    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                   }}
-                  isAnimationActive={!isUpdating}
-                  animationDuration={isUpdating ? 0 : 500}
+                />
+                <YAxis domain={['dataMin', 'dataMax']} tickFormatter={formatYAxis} hide={false} />
+                <Tooltip content={<CustomTooltip />} />
+                <Line
+                  type="monotone"
+                  dataKey="price"
+                  stroke={lineColor}
+                  strokeWidth={2}
+                  dot={false}
+                  isAnimationActive={false}
+                  name={coinName}
                 />
                 {showTrend && regressionInfo && (
                   <Line
@@ -438,10 +401,12 @@ function CryptoChart({ coinId = "90", coinName = "Bitcoin", timeframe: timeframe
         )}
         <div className="mt-4 pt-4 border-t border-border/50">
           <button
-            onClick={onView}
+            onClick={() => setShowTrend(!showTrend)}
             className="w-full flex items-center justify-center space-x-2 text-primary hover:text-primary-foreground hover:bg-primary transition-all duration-300 py-2 sm:py-3 px-3 sm:px-4 rounded-lg border border-primary/30 hover:border-primary shadow-lg"
           >
-            <span className="text-xs sm:text-sm font-medium">View Detailed Analysis</span>
+            <span className="text-xs sm:text-sm font-medium">
+              {showTrend ? "Hide Trend" : "Show Trend"}
+            </span>
           </button>
         </div>
       </CardContent>
@@ -451,3 +416,4 @@ function CryptoChart({ coinId = "90", coinName = "Bitcoin", timeframe: timeframe
 
 // Export memoized component to prevent unnecessary re-renders
 export default memo(CryptoChart);
+
